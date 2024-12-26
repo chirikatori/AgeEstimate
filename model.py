@@ -14,7 +14,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import r2_score, mean_absolute_error
 import matplotlib.pyplot as plt
-from mne_features.feature_extraction import extract_features
+from sklearn.utils import shuffle
+from sklearn.model_selection import train_test_split
+
 import coffeine
 
 # Define constants and paths
@@ -30,16 +32,19 @@ file_paths = [os.path.join(RAW_DATA_FOLDER, f"{participant_id}_sflip_parc-raw.fi
 # Load raw data and pick 'misc' channel
 data_raw = [mne.io.read_raw_fif(path, preload=True, verbose=False).pick('misc') for path in tqdm(file_paths, desc="Loading Data")]
 for raw in data_raw:
-    raw.set_channel_types({ch_name: 'eeg' for ch_name in raw.info['ch_names'] if 'misc' in ch_name})
+    raw.set_channel_types({ch_name: 'eeg' for ch_name in raw.info['ch_names'] if 'misc' in ch_name}) 
 channel = data_raw[0].info['ch_names']
 for r in data_raw:
     r.pick(channel)
 
-# Create 2-second epochs
+mne.set_log_level("ERROR")
+epoch_duration = 50
+start_time = 0
+stop_time = 574
 events = mne.make_fixed_length_events(
-    data_raw[0], start=2, duration=2 - 1 / data_raw[0].info['sfreq'], overlap=0., stop=100
+    data_raw[0], start=start_time, duration=epoch_duration - 1 / data_raw[0].info['sfreq'], overlap=0., stop=stop_time
 )
-data_epoch = [mne.Epochs(raw, events=events, event_id=1, tmin=0, tmax=2, proj=False, baseline=None, preload=True) for raw in data_raw]
+data_epoch = [mne.Epochs(raw, events=events, event_id=1, tmin=0, tmax=epoch_duration, proj=True, baseline=None, preload=True) for raw in data_raw]
 
 # Filter valid epochs
 valid_data_epoch = [epoch for epoch in data_epoch if epoch is not None and len(epoch) > 0]
@@ -47,29 +52,6 @@ invalid_indices = [i for i, epoch in enumerate(data_epoch) if epoch is None or l
 print(f"Removed epochs at indices: {invalid_indices}")
 print(f"Remaining valid epochs: {len(valid_data_epoch)}")
 
-# Feature extraction parameters
-# HC_SELECTED_FUNCS = [
-#     'std', 'kurtosis', 'skewness', 'quantile', 'ptp_amp', 'mean', 'pow_freq_bands',
-#     'spect_entropy', 'app_entropy', 'samp_entropy', 'svd_entropy', 'hurst_exp',
-#     'hjorth_complexity', 'hjorth_mobility', 'line_length', 'wavelet_coef_energy',
-#     'higuchi_fd', 'zero_crossings', 'svd_fisher_info'
-# ]
-# HC_FUNC_PARAMS = {
-#     'quantile__q': [0.1, 0.25, 0.75, 0.9],
-#     'pow_freq_bands__freq_bands': [0, 2, 4, 8, 13, 18, 24, 30, 49],
-#     'pow_freq_bands__ratios': 'all',
-#     'pow_freq_bands__ratios_triu': True,
-#     'pow_freq_bands__log': True,
-#     'pow_freq_bands__normalize': None
-# }
-
-# # Extract features from epochs
-# final_features = [
-#     extract_features(
-#         epoch.get_data(), epoch.info['sfreq'], HC_SELECTED_FUNCS,
-#         funcs_params=HC_FUNC_PARAMS, n_jobs=-1, ch_names=epoch.ch_names
-#     ) for epoch in tqdm(valid_data_epoch, desc="Extracting Features")
-# ]
 
 # Define frequency bands for coffeine
 FREQUENCY_BANDS = {
@@ -96,13 +78,17 @@ data_train = [
 ]
 covs = np.array([sub['covs'] for sub in data_train])
 X = pd.DataFrame({band: list(covs[:, ii]) for ii, band in enumerate(FREQUENCY_BANDS)})
+y = [age for i, age in enumerate(metadata["age"]) if i not in invalid_indices]
 
+bins = np.arange(0, 100, 10) 
+y_binned = np.digitize(y, bins=bins, right=False)
 # Prepare training and validation datasets
-train_size = int(len(X) * 0.75)
-X_train, X_valid = X[:train_size], X[train_size:]
-y_train = [age for i, age in enumerate(metadata["age"]) if i not in invalid_indices]
-y_train = y_train[:len(X)]
-y_train, y_valid = y_train[:train_size], y_train[train_size:]
+X_train, X_valid, y_train, y_valid = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y_binned
+)
+
+print(f"Training set size: {len(X_train)}")
+print(f"Validation set size: {len(X_valid)}")
 
 # Train Ridge regression model
 filter_bank_transformer = coffeine.make_filter_bank_transformer(
@@ -147,6 +133,4 @@ plt.legend()
 plt.grid(True)
 
 plt.tight_layout()
-plt.savefig("ground_truth_vs_predictions.png", dpi=300, bbox_inches='tight')
 plt.show()
-
